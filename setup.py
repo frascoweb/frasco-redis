@@ -5,6 +5,9 @@ def desc():
     with open("README.md") as f:
         return f.read()
 
+def reqs():
+    with open('requirements.txt') as f:
+        return f.read().splitlines()
 
 setup(
     name='frasco-redis',
@@ -17,8 +20,5 @@ setup(
     long_description=desc(),
     py_modules=['frasco_redis'],
     platforms='any',
-    install_requires=[
-        'frasco',
-        'redis==2.10.1'
-    ]
+    install_requires=reqs() + ['frasco']
 )
