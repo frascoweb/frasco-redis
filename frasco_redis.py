@@ -9,7 +9,7 @@ import inspect
 def CacheFragmentExtension(name=None, caller=None, timeout=None, key=None, model=None, facets=None, ns=None):
     conn = current_app.features.redis.connection
     if model:
-        if not model.cache_key:
+        if not getattr(model, 'cache_key', None):
             current_app.features.redis.update_model_cache_key(model)
         key = model.cache_key
     if not facets:
@@ -27,11 +27,15 @@ def CacheFragmentExtension(name=None, caller=None, timeout=None, key=None, model
 
 
 class PartialObject(object):
-    def __init__(self, cached_attrs):
-        object.__setattr__(self, "_cached_attrs", cached_attrs)
+    def __init__(self, loader, cached_attrs=None):
+        object.__setattr__(self, '_loader', loader)
+        object.__setattr__(self, "_obj", None)
+        object.__setattr__(self, "_cached_attrs", dict(cached_attrs or {}))
 
     def _load(self):
-        raise NotImplementedError
+        if not self._obj:
+            object.__setattr__(self, "_obj",self.loader())
+        return self._obj
 
     def __getattr__(self, name):
         if name in self._cached_attrs:
@@ -39,27 +43,9 @@ class PartialObject(object):
         return getattr(self._load(), name)
 
     def __setattr__(self, name, value):
+        if name in self._cached_attrs:
+            del self._cached_attrs[name]
         setattr(self._load(), name, value)
-
-
-class PartialModel(PartialObject):
-    def __init__(self, model, pk, cached_attrs):
-        super(PartialModel, self).__init__(cached_attrs)
-        object.__setattr__(self, "_model", model)
-        object.__setattr__(self, "_pk", pk)
-        object.__setattr__(self, "_obj", None)
-
-    def pk(self):
-        return self._pk
-
-    @property
-    def id(self):
-        return self._pk
-
-    def _load(self):
-        if not self._obj:
-            object.__setattr__(self, "_obj", self._model.query.get(self._pk))
-        return self._obj
 
 
 class RedisFeature(Feature):
@@ -105,26 +91,28 @@ class RedisFeature(Feature):
             app.actions.register(action("redis_" + op)(getattr(self.connection, op)))
 
     def update_model_cache_key(self, obj, save=True):
-        obj.cache_key = "%s:%s" % (obj.pk(), time.time())
+        obj.cache_key = "%s:%s" % (obj.id, time.time())
         self.cache_model_attributes(obj)
         if save:
-            current_app.features.models.save(obj)
+            obj.save()
 
     def cache_model_attributes(self, obj):
-        key = "models_attrs:%s:%s" % (obj.__class__.__name__, obj.pk())
+        key = "models_attrs:%s:%s" % (obj.__class__.__name__, obj.id)
         attrs = dict((k, getattr(obj, k)) for k in self.options["cache_model_attrs"].get(obj.__class__.__name__, []))
         if attrs:
             self.connection.hmset(key, attrs)
 
-    def get_cached_model_attributes(self, model, pk):
+    def get_cached_model_attributes(self, model, id):
         if inspect.isclass(model):
             model = model.__name__
-        key = "models_attrs:%s:%s" % (model, pk)
+        key = "models_attrs:%s:%s" % (model, id)
         return self.connection.hgetall(key) or {}
 
-    def get_partial_model_from_cache(self, model, pk):
-        cached_attrs = self.get_cached_model_attributes(model, pk)
-        return PartialModel(model, pk, cached_attrs)
+    def get_partial_model_from_cache(self, model, id):
+        cached_attrs = self.get_cached_model_attributes(model, id)
+        def loader():
+            return current_app.features.models.query(model).get(id)
+        return PartialObject(loader, dict(cached_attrs, id=id))
 
     def make_cache_key(self, key, ns=None, facets=None):
         if isinstance(key, (list, tuple)):
