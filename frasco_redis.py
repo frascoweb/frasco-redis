@@ -1,6 +1,7 @@
 from frasco import Feature, action, current_app, current_context, g, hook, request, signal
 from frasco.templating import jinja_fragment_extension
 from redis import StrictRedis
+from werkzeug.local import LocalProxy
 import time
 import inspect
 
@@ -155,3 +156,9 @@ class RedisFeature(Feature):
     @action(default_option="key")
     def clear_request_cache(self, key=None, ns=None, facets=None):
         self.connection.delete(self.make_request_cache_key(key, facets, ns))
+
+
+def get_current_redis():
+    return current_app.features.redis.connection
+
+redis = LocalProxy(get_current_redis)
