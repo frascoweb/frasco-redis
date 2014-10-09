@@ -138,12 +138,12 @@ class RedisFeature(Feature):
         return self.make_cache_key(key, facets, ns)
 
     @action("cached", default_option="timeout")
-    def cache_view(self, timout=None, key=None, ns=None, facets=None):
+    def cache_view(self, timeout=None, key=None, ns=None, facets=None):
         key = self.make_request_cache_key(key, facets, ns)
         data = self.connection.get(key)
         if data is not None:
             current_context.exit(data)
-        g.redis_cache_view = (key, timout or self.options["view_cache_timeout"])
+        g.redis_cache_view = (key, timeout or self.options["view_cache_timeout"])
         return key
 
     @hook()
