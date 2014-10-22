@@ -1,14 +1,6 @@
 from setuptools import setup
 
 
-def desc():
-    with open("README.md") as f:
-        return f.read()
-
-def reqs():
-    with open('requirements.txt') as f:
-        return f.read().splitlines()
-
 setup(
     name='frasco-redis',
     version='0.1',
@@ -17,8 +9,11 @@ setup(
     author='Maxime Bouroumeau-Fuseau',
     author_email='maxime.bouroumeau@gmail.com',
     description="Redis integration for Frasco",
-    long_description=desc(),
     py_modules=['frasco_redis'],
+    zip_safe=False,
     platforms='any',
-    install_requires=reqs() + ['frasco']
+    install_requires=[
+        # 'frasco',
+        'redis>=2.10.1'
+    ]
 )
