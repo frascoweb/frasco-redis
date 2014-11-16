@@ -1,52 +1,9 @@
 from frasco import Feature, action, current_app, current_context, g, hook, request, signal
-from frasco.templating import jinja_fragment_extension
 from redis import StrictRedis
 from werkzeug.local import LocalProxy
 import time
 import inspect
-
-
-@jinja_fragment_extension("cache")
-def CacheFragmentExtension(name=None, caller=None, timeout=None, key=None, model=None, facets=None, ns=None):
-    conn = current_app.features.redis.connection
-    if model:
-        if not getattr(model, 'cache_key', None):
-            current_app.features.redis.update_model_cache_key(model)
-        key = model.cache_key
-    if not facets:
-        facets = []
-    if name:
-        facets.insert(0, name)
-    key = current_app.features.redis.make_request_cache_key(key, ns, facets)
-    rv = conn.get(key)
-    if rv is None:
-        timeout = timeout or current_app.features.redis.options["fragment_cache_timeout"]\
-            or current_app.features.redis.options["view_cache_timeout"]
-        rv = caller()
-        conn.setex(key, timeout, rv)
-    return rv
-
-
-class PartialObject(object):
-    def __init__(self, loader, cached_attrs=None):
-        object.__setattr__(self, '_loader', loader)
-        object.__setattr__(self, "_obj", None)
-        object.__setattr__(self, "_cached_attrs", dict(cached_attrs or {}))
-
-    def _load(self):
-        if not self._obj:
-            object.__setattr__(self, "_obj",self.loader())
-        return self._obj
-
-    def __getattr__(self, name):
-        if name in self._cached_attrs:
-            return self._cached_attrs[name]
-        return getattr(self._load(), name)
-
-    def __setattr__(self, name, value):
-        if name in self._cached_attrs:
-            del self._cached_attrs[name]
-        setattr(self._load(), name, value)
+from .utils import *
 
 
 class RedisFeature(Feature):

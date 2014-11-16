@@ -1,0 +1,351 @@
+from frasco import current_app
+from frasco.templating import jinja_fragment_extension
+import re
+import json
+import inspect
+
+
+__all__ = ('CacheFragmentExtension', 'PartialObject', 'redis_cached_property',
+           'redis_cached_property_as_json', 'redis_cached_method', 'redis_cached_method_as_json',
+           'RedisHash', 'JSONRedisHash', 'RedisList', 'JSONRedisList', 'build_object_key')
+
+
+@jinja_fragment_extension("cache")
+def CacheFragmentExtension(name=None, caller=None, timeout=None, key=None, model=None, facets=None, ns=None):
+    conn = current_app.features.redis.connection
+    if model:
+        if not getattr(model, 'cache_key', None):
+            current_app.features.redis.update_model_cache_key(model)
+        key = model.cache_key
+    if not facets:
+        facets = []
+    if name:
+        facets.insert(0, name)
+    key = current_app.features.redis.make_request_cache_key(key, ns, facets)
+    rv = conn.get(key)
+    if rv is None:
+        timeout = timeout or current_app.features.redis.options["fragment_cache_timeout"]\
+            or current_app.features.redis.options["view_cache_timeout"]
+        rv = caller()
+        conn.setex(key, timeout, rv)
+    return rv
+
+
+class PartialObject(object):
+    def __init__(self, loader, cached_attrs=None):
+        object.__setattr__(self, '_loader', loader)
+        object.__setattr__(self, "_obj", None)
+        object.__setattr__(self, "_cached_attrs", dict(cached_attrs or {}))
+
+    def _load(self):
+        if not self._obj:
+            object.__setattr__(self, "_obj",self.loader())
+        return self._obj
+
+    def __getattr__(self, name):
+        if name in self._cached_attrs:
+            return self._cached_attrs[name]
+        return getattr(self._load(), name)
+
+    def __setattr__(self, name, value):
+        if name in self._cached_attrs:
+            del self._cached_attrs[name]
+        setattr(self._load(), name, value)
+
+
+def build_object_key(obj, name=None, key=None, at_values=None):
+    super_key = getattr(obj, '__redis_cache_key__', None)
+    if key and '{__super__}' in key and super_key is not None:
+        key = key.replace('{__super__}', super_key)
+    elif not key and super_key:
+        key = super_key
+    elif not key:
+        key = '%s:{__name__}' % obj.__class__.__name__
+    attributes = {}
+    for attr in re.findall(r'\{(@?[a-z0-9_]+)[^}]*\}', key, re.I):
+        value = ''
+        if attr == '__name__':
+            value = name or obj.__class__.__name__
+        elif attr.startswith('@') and at_values:
+            value = at_values.get(attr[1:], '')
+        else:
+            value = getattr(obj, attr)
+        if value:
+            cache_id = getattr(value, '__redis_cache_id__', None)
+            if cache_id:
+                value = cache_id()
+        attributes[attr] = value
+    return key.format(**attributes)
+
+
+class UnknownValue(object):
+    pass
+
+unknown_value = UnknownValue()
+
+
+class RedisCachedAttribute(object):
+    def __init__(self, redis=None, key=None, ttl=None, coerce=None,\
+                 serializer=None, name=None):
+        self._redis = redis
+        self.key = key
+        self.ttl = ttl
+        self.coerce = coerce
+        self.serializer = serializer
+        self.name = name
+
+    @property
+    def redis(self):
+        return self._redis or current_app.features.redis.connection
+
+    def _set_cached_value(self, key, value, ttl=None):
+        if self.serializer:
+            value = self.serializer.dumps(value)
+        if ttl is None:
+            ttl = self.ttl
+        if ttl is not None:
+            self.redis.setex(key, ttl, value)
+        else:
+            self.redis.set(key, value)
+
+    def _get_cached_value(self, key):
+        value = self.redis.get(key)
+        if value is None:
+            return None
+        if self.serializer:
+            value = self.serializer.loads(value)
+        if self.coerce:
+            value = self.coerce(value)
+        return value
+
+
+class RedisCachedProperty(RedisCachedAttribute):
+    def __init__(self, fget, fset=None, fdel=None, **kwargs):
+        super(RedisCachedProperty, self).__init__(**kwargs)
+        self.fget = fget
+        self.fset = fset
+        self.fdel = fdel
+        self.__name__ = fget.__name__
+        self.__doc__ = fget.__doc__
+        if not self.name:
+            self.name = self.__name__
+
+    def __get__(self, obj, cls):
+        if obj is None:
+            return self
+        value = obj.__dict__.get(self.__name__, unknown_value)
+        if value is unknown_value:
+            key = self.build_key(obj)
+            value = self._get_cached_value(key)
+            if value is None:
+                value = self.get_fresh(obj)
+                self._set_cached_value(key, value,
+                    getattr(obj, '__redis_cache_ttl__', None))
+            obj.__dict__[self.__name__] = value
+        return value
+
+    def __set__(self, obj, value):
+        if self.fset is None:
+            raise AttributeError("can't set attribute")
+        self.fset(obj, value)
+        self.invalidate(obj)
+
+    def __delete__(self, obj):
+        if self.fdel is None:
+            raise AttributeError("can't delete attribute")
+        self.fdel(obj)
+        self.invalidate(obj)
+
+    def build_key(self, obj):
+        return build_object_key(obj, self.name, self.key)
+
+    def get_fresh(self, obj):
+        return self.fget(obj)
+
+    def require_fresh(self, obj):
+        obj.__dict__.pop(self.__name__, None)
+
+    def invalidate(self, obj):
+        self.redis.delete(self.build_key(obj))
+
+    def setter(self, fset):
+        self.fset = fset
+        return self
+
+    def deleter(self, fdel):
+        self.fdel = fdel
+        return self
+
+
+def redis_cached_property(fget=None, **kwargs):
+    def wrapper(f):
+        return RedisCachedProperty(f, **kwargs)
+    if fget:
+        return wrapper(fget)
+    return wrapper
+
+
+def redis_cached_property_as_json(fget=None, **kwargs):
+    kwargs['serializer'] = json
+    return redis_cached_property(fget, **kwargs)
+
+
+class RedisCachedMethod(RedisCachedAttribute):
+    def __init__(self, func, **kwargs):
+        super(RedisCachedMethod, self).__init__(**kwargs)
+        self.func = func
+        self.__name__ = func.__name__
+        self.__doc__ = func.__doc__
+        if not self.name:
+            self.name = self.__name__
+
+    def __get__(self, obj, cls=None):
+        self.obj = obj
+        return self
+
+    def __call__(self, *args, **kwargs):
+        value = self.obj.__dict__.get(self.__name__, unknown_value)
+        if value is unknown_value:
+            key = self.build_key(args, kwargs)
+            value = self._get_cached_value(key)
+            if value is None:
+                value = self.fresh(*args, **kwargs)
+                self._set_cached_value(key, value,
+                    getattr(self.obj, '__redis_cache_ttl__', None))
+            self.obj.__dict__[self.__name__] = value
+        return value
+
+    def fresh(self, *args, **kwargs):
+        return self.func(self.obj, *args, **kwargs)
+
+    def require_fresh(self):
+        self.obj.__dict__.pop(self.__name__, None)
+
+    def invalidate(self, *args, **kwargs):
+        self.redis.delete(self.build_key(self.obj, args, kwargs))
+
+    def build_key(self, args=None, kwargs=None):
+        if not args:
+            args = []
+        if not kwargs:
+            kwargs = {}
+        at_values = inspect.getcallargs(self.func, self.obj, *args, **kwargs)
+        return build_object_key(self.obj, self.name, self.key, at_values)
+
+
+def redis_cached_method(func=None, **kwargs):
+    def wrapper(f):
+        return RedisCachedMethod(f, **kwargs)
+    if func:
+        return wrapper(func)
+    return wrapper
+
+
+def redis_cached_method_as_json(func=None, **kwargs):
+    kwargs['serializer'] = json
+    return redis_cached_method(func, **kwargs)
+
+
+class RedisObject(object):
+    def __init__(self, key, serializer=None, coerce=None, redis=None):
+        self.key = key
+        self.serializer = serializer
+        self.coerce = coerce
+        self.redis = redis or current_app.features.redis.connection
+
+    def _to_redis(self, value):
+        if self.serializer:
+            return self.serializer.dumps(value)
+        return value
+
+    def _from_redis(self, value):
+        if self.serializer:
+            value = self.serializer.loads(value)
+        if self.coerce:
+            value = self.coerce(value)
+        return value
+
+    def clear(self):
+        self.redis.delete(self.key)
+
+    def expire(self, ttl):
+        self.redis.expire(self.key, ttl)
+
+
+class RedisHash(RedisObject):
+    def __setitem__(self, key, value):
+        self.redis.hset(self.key, key, self._to_redis(value))
+
+    def __getitem__(self, key):
+        return self._from_redis(self.redis.hget(self.key, key))
+
+    def __delitem__(self, key):
+        return self.redis.hdel(self.key, key)
+
+    def __contains__(self, key):
+        return key in self.keys()
+
+    def keys(self):
+        return self.redis.hkeys(self.key)
+
+    def items(self):
+        return {k: self._from_redis(v) for k, v in self.redis.hgetall(self.key).iteritems()}
+
+    def values(self):
+        return self.items().values()
+
+    def update(self, dct):
+        pipe = self.redis.pipeline()
+        for k, v in dct.iteritems():
+            pipe.hset(self.key, k, self._to_redis(v))
+        pipe.execute()
+
+
+class JSONRedisHash(RedisHash):
+    def __init__(self, key, **kwargs):
+        kwargs['serializer'] = json
+        super(JSONRedisHash, self).__init__(key, **kwargs)
+
+
+class RedisList(RedisObject):
+    def __setitem__(self, index, value):
+        self.redis.lset(self.key, index, self._to_redis(value))
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            if slice.step is not None:
+                return [self[i] for i in xrange(*index.indices(len(self)))]
+            return [self._from_redis(v) for v in \
+                self.redis.lrange(self.key, slice.start or 0, slice.stop or -1)]
+        elif isinstance(index, int):
+            return self._from_redis(self.redis.lindex(self.key, index))
+        else:
+            raise TypeError("Invalid argument type.")
+
+    def __len__(self):
+        return self.redis.llen(self.key)
+
+    def __iter__(self):
+        for value in self.redis.lrange(self.key, 0, -1):
+            yield self._from_redis(value)
+
+    def __contains__(self, value):
+        return value in list(self)
+
+    def append(self, value):
+        self.redis.rpush(self.key, self._to_redis(value))
+
+    def extend(self, lst):
+        pipe = self.redis.pipeline()
+        for v in lst:
+            pipe.rpush(self.key, self._to_redis(v))
+        pipe.execute()
+
+    def remove(self, value):
+        self.redis.lrem(self.key, self._to_redis(value))
+
+
+class JSONRedisList(RedisList):
+    def __init__(self, key, **kwargs):
+        kwargs['serializer'] = json
+        super(JSONRedisList, self).__init__(key, **kwargs)
