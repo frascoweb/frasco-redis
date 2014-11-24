@@ -85,24 +85,31 @@ unknown_value = UnknownValue()
 
 
 class RedisCachedAttribute(object):
-    def __init__(self, redis=None, key=None, ttl=None, coerce=None,\
+    def __init__(self, func, redis=None, key=None, ttl=None, coerce=None,\
                  serializer=None, name=None):
+        self.func = func
+        self.__name__ = func.__name__
+        self.__doc__ = func.__doc__
         self._redis = redis
         self.key = key
         self.ttl = ttl
         self.coerce = coerce
         self.serializer = serializer
-        self.name = name
+        self.name = name or self.__name__
+        self.cache_disabled = False
+        self.cache_ignore_current = False
+        self.cache_current_ttl = None
 
     @property
     def redis(self):
         return self._redis or current_app.features.redis.connection
 
-    def _set_cached_value(self, key, value, ttl=None):
+    def _set_cached_value(self, key, value, default_ttl=None):
         if self.serializer:
             value = self.serializer.dumps(value)
+        ttl = self.cache_current_ttl
         if ttl is None:
-            ttl = self.ttl
+            ttl = default_ttl
         if ttl is not None:
             self.redis.setex(key, ttl, value)
         else:
@@ -118,29 +125,32 @@ class RedisCachedAttribute(object):
             value = self.coerce(value)
         return value
 
+    def _call_func(self, obj, *args, **kwargs):
+        self.cache_ignore_current = False
+        self.cache_current_ttl = self.ttl
+        return self.func(obj, *args, **kwargs)
+
 
 class RedisCachedProperty(RedisCachedAttribute):
-    def __init__(self, fget, fset=None, fdel=None, **kwargs):
-        super(RedisCachedProperty, self).__init__(**kwargs)
-        self.fget = fget
+    def __init__(self, func, fset=None, fdel=None, **kwargs):
+        super(RedisCachedProperty, self).__init__(func, **kwargs)
         self.fset = fset
         self.fdel = fdel
-        self.__name__ = fget.__name__
-        self.__doc__ = fget.__doc__
-        if not self.name:
-            self.name = self.__name__
 
     def __get__(self, obj, cls):
         if obj is None:
             return self
         value = obj.__dict__.get(self.__name__, unknown_value)
         if value is unknown_value:
-            key = self.build_key(obj)
-            value = self._get_cached_value(key)
+            value = None
+            if not self.cache_disabled:
+                key = self.build_key(obj)
+                value = self._get_cached_value(key)
             if value is None:
                 value = self.get_fresh(obj)
-                self._set_cached_value(key, value,
-                    getattr(obj, '__redis_cache_ttl__', None))
+                if not self.cache_disabled and not self.cache_ignore_current:
+                    self._set_cached_value(key, value,
+                        getattr(obj, '__redis_cache_ttl__', None))
             obj.__dict__[self.__name__] = value
         return value
 
@@ -160,7 +170,7 @@ class RedisCachedProperty(RedisCachedAttribute):
         return build_object_key(obj, self.name, self.key)
 
     def get_fresh(self, obj):
-        return self.fget(obj)
+        return self._call_func(obj)
 
     def require_fresh(self, obj):
         obj.__dict__.pop(self.__name__, None)
@@ -191,14 +201,6 @@ def redis_cached_property_as_json(fget=None, **kwargs):
 
 
 class RedisCachedMethod(RedisCachedAttribute):
-    def __init__(self, func, **kwargs):
-        super(RedisCachedMethod, self).__init__(**kwargs)
-        self.func = func
-        self.__name__ = func.__name__
-        self.__doc__ = func.__doc__
-        if not self.name:
-            self.name = self.__name__
-
     def __get__(self, obj, cls=None):
         self.obj = obj
         return self
@@ -206,17 +208,20 @@ class RedisCachedMethod(RedisCachedAttribute):
     def __call__(self, *args, **kwargs):
         value = self.obj.__dict__.get(self.__name__, unknown_value)
         if value is unknown_value:
-            key = self.build_key(args, kwargs)
-            value = self._get_cached_value(key)
+            value = None
+            if not self.cache_disabled:
+                key = self.build_key(args, kwargs)
+                value = self._get_cached_value(key)
             if value is None:
                 value = self.fresh(*args, **kwargs)
-                self._set_cached_value(key, value,
-                    getattr(self.obj, '__redis_cache_ttl__', None))
+                if not self.cache_disabled and not self.cache_ignore_current:
+                    self._set_cached_value(key, value,
+                        getattr(self.obj, '__redis_cache_ttl__', None))
             self.obj.__dict__[self.__name__] = value
         return value
 
     def fresh(self, *args, **kwargs):
-        return self.func(self.obj, *args, **kwargs)
+        return self._call_func(self.obj, *args, **kwargs)
 
     def require_fresh(self):
         self.obj.__dict__.pop(self.__name__, None)
