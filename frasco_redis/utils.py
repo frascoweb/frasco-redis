@@ -1,7 +1,6 @@
-from frasco import current_app
+from frasco import current_app, json
 from frasco.templating import jinja_fragment_extension
 import re
-import json
 import inspect
 
 
@@ -96,6 +95,7 @@ class RedisCachedAttribute(object):
         self.coerce = coerce
         self.serializer = serializer
         self.name = name or self.__name__
+        self.cached_property_name = self.__name__ + '_cached'
         self.cache_disabled = False
         self.cache_ignore_current = False
         self.cache_current_ttl = None
@@ -140,7 +140,7 @@ class RedisCachedProperty(RedisCachedAttribute):
     def __get__(self, obj, cls):
         if obj is None:
             return self
-        value = obj.__dict__.get(self.__name__, unknown_value)
+        value = obj.__dict__.get(self.cached_property_name, unknown_value)
         if value is unknown_value:
             value = None
             if not self.cache_disabled:
@@ -151,7 +151,7 @@ class RedisCachedProperty(RedisCachedAttribute):
                 if not self.cache_disabled and not self.cache_ignore_current:
                     self._set_cached_value(key, value,
                         getattr(obj, '__redis_cache_ttl__', None))
-            obj.__dict__[self.__name__] = value
+            obj.__dict__[self.cached_property_name] = value
         return value
 
     def __set__(self, obj, value):
@@ -173,7 +173,7 @@ class RedisCachedProperty(RedisCachedAttribute):
         return self._call_func(obj)
 
     def require_fresh(self, obj):
-        obj.__dict__.pop(self.__name__, None)
+        obj.__dict__.pop(self.cached_property_name, None)
 
     def invalidate(self, obj):
         self.redis.delete(self.build_key(obj))
@@ -206,7 +206,7 @@ class RedisCachedMethod(RedisCachedAttribute):
         return self
 
     def __call__(self, *args, **kwargs):
-        value = self.obj.__dict__.get(self.__name__, unknown_value)
+        value = self.obj.__dict__.get(self.cached_property_name, unknown_value)
         if value is unknown_value:
             value = None
             if not self.cache_disabled:
@@ -217,14 +217,14 @@ class RedisCachedMethod(RedisCachedAttribute):
                 if not self.cache_disabled and not self.cache_ignore_current:
                     self._set_cached_value(key, value,
                         getattr(self.obj, '__redis_cache_ttl__', None))
-            self.obj.__dict__[self.__name__] = value
+            self.obj.__dict__[self.cached_property_name] = value
         return value
 
     def fresh(self, *args, **kwargs):
         return self._call_func(self.obj, *args, **kwargs)
 
     def require_fresh(self):
-        self.obj.__dict__.pop(self.__name__, None)
+        self.obj.__dict__.pop(self.cached_property_name, None)
 
     def invalidate(self, *args, **kwargs):
         self.redis.delete(self.build_key(self.obj, args, kwargs))
