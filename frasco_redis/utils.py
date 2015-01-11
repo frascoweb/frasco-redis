@@ -144,8 +144,11 @@ class RedisCachedProperty(RedisCachedAttribute):
         if value is unknown_value:
             value = None
             if not self.cache_disabled:
-                key = self.build_key(obj)
-                value = self._get_cached_value(key)
+                try:
+                    key = self.build_key(obj)
+                    value = self._get_cached_value(key)
+                except:
+                    value = None
             if value is None:
                 value = self.get_fresh(obj)
                 if not self.cache_disabled and not self.cache_ignore_current:
@@ -210,8 +213,11 @@ class RedisCachedMethod(RedisCachedAttribute):
         if value is unknown_value:
             value = None
             if not self.cache_disabled:
-                key = self.build_key(args, kwargs)
-                value = self._get_cached_value(key)
+                try:
+                    key = self.build_key(args, kwargs)
+                    value = self._get_cached_value(key)
+                except:
+                    value = None
             if value is None:
                 value = self.fresh(*args, **kwargs)
                 if not self.cache_disabled and not self.cache_ignore_current:
@@ -331,6 +337,7 @@ class RedisList(RedisObject):
         return self.redis.llen(self.key)
 
     def __iter__(self):
+        current_app.logger.debug(self.key)
         for value in self.redis.lrange(self.key, 0, -1):
             yield self._from_redis(value)
 
