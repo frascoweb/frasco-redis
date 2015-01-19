@@ -4,7 +4,7 @@ import re
 import inspect
 
 
-__all__ = ('CacheFragmentExtension', 'PartialObject', 'redis_cached_property',
+__all__ = ('CacheFragmentExtension', 'PartialObject', 'unknown_value', 'redis_cached_property',
            'redis_cached_property_as_json', 'redis_cached_method', 'redis_cached_method_as_json',
            'RedisHash', 'JSONRedisHash', 'RedisList', 'JSONRedisList', 'build_object_key')
 
@@ -116,6 +116,8 @@ class RedisCachedAttribute(object):
             self.redis.set(key, value)
 
     def _get_cached_value(self, key):
+        if not self.redis.exists(key):
+            return unknown_value
         value = self.redis.get(key)
         if value is None:
             return None
@@ -142,16 +144,17 @@ class RedisCachedProperty(RedisCachedAttribute):
             return self
         value = obj.__dict__.get(self.cached_property_name, unknown_value)
         if value is unknown_value:
-            value = None
+            key = None
             if not self.cache_disabled:
                 try:
                     key = self.build_key(obj)
                     value = self._get_cached_value(key)
-                except:
-                    value = None
-            if value is None:
+                except Exception as e:
+                    current_app.logger.error(e)
+                    value = unknown_value
+            if value is unknown_value:
                 value = self.get_fresh(obj)
-                if not self.cache_disabled and not self.cache_ignore_current:
+                if not self.cache_disabled and not self.cache_ignore_current and key:
                     self._set_cached_value(key, value,
                         getattr(obj, '__redis_cache_ttl__', None))
             obj.__dict__[self.cached_property_name] = value
@@ -172,6 +175,13 @@ class RedisCachedProperty(RedisCachedAttribute):
     def build_key(self, obj):
         return build_object_key(obj, self.name, self.key)
 
+    def get_cached(self, obj):
+        try:
+            key = self.build_key(obj)
+            return self._get_cached_value(key)
+        except:
+            pass
+
     def get_fresh(self, obj):
         return self._call_func(obj)
 
@@ -179,7 +189,12 @@ class RedisCachedProperty(RedisCachedAttribute):
         obj.__dict__.pop(self.cached_property_name, None)
 
     def invalidate(self, obj):
-        self.redis.delete(self.build_key(obj))
+        try:
+            key = self.build_key(obj)
+        except Exception as e:
+            current_app.logger.error(e)
+            return
+        self.redis.delete(key)
 
     def setter(self, fset):
         self.fset = fset
@@ -209,31 +224,40 @@ class RedisCachedMethod(RedisCachedAttribute):
         return self
 
     def __call__(self, *args, **kwargs):
-        value = self.obj.__dict__.get(self.cached_property_name, unknown_value)
+        value = unknown_value
+        if not self.cache_disabled:
+            key = None
+            try:
+                key = self.build_key(args, kwargs)
+                value = self._get_cached_value(key)
+            except Exception as e:
+                current_app.logger.error(e)
+                value = unknown_value
         if value is unknown_value:
-            value = None
-            if not self.cache_disabled:
-                try:
-                    key = self.build_key(args, kwargs)
-                    value = self._get_cached_value(key)
-                except:
-                    value = None
-            if value is None:
-                value = self.fresh(*args, **kwargs)
-                if not self.cache_disabled and not self.cache_ignore_current:
-                    self._set_cached_value(key, value,
-                        getattr(self.obj, '__redis_cache_ttl__', None))
-            self.obj.__dict__[self.cached_property_name] = value
+            value = self.fresh(*args, **kwargs)
+            if not self.cache_disabled and not self.cache_ignore_current and key:
+                self._set_cached_value(key, value,
+                    getattr(self.obj, '__redis_cache_ttl__', None))
         return value
+
+    def cached(self, *args, **kwargs):
+        try:
+            key = self.build_key(args, kwargs)
+        except Exception as e:
+            current_app.logger.error(e)
+            return unknown_value
+        return self._get_cached_value(key)
 
     def fresh(self, *args, **kwargs):
         return self._call_func(self.obj, *args, **kwargs)
 
-    def require_fresh(self):
-        self.obj.__dict__.pop(self.cached_property_name, None)
-
     def invalidate(self, *args, **kwargs):
-        self.redis.delete(self.build_key(self.obj, args, kwargs))
+        try:
+            key = self.build_key(args, kwargs)
+        except Exception as e:
+            current_app.logger.error(e)
+            return
+        self.redis.delete(key)
 
     def build_key(self, args=None, kwargs=None):
         if not args:
@@ -337,7 +361,6 @@ class RedisList(RedisObject):
         return self.redis.llen(self.key)
 
     def __iter__(self):
-        current_app.logger.debug(self.key)
         for value in self.redis.lrange(self.key, 0, -1):
             yield self._from_redis(value)
 
