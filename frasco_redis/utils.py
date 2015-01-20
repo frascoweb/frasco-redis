@@ -4,9 +4,10 @@ import re
 import inspect
 
 
-__all__ = ('CacheFragmentExtension', 'PartialObject', 'unknown_value', 'redis_cached_property',
-           'redis_cached_property_as_json', 'redis_cached_method', 'redis_cached_method_as_json',
-           'RedisHash', 'JSONRedisHash', 'RedisList', 'JSONRedisList', 'build_object_key')
+__all__ = ('CacheFragmentExtension', 'PartialObject', 'redis_get_set', 'redis_get_set_as_json',
+           'redis_cached_function', 'unknown_value', 'redis_cached_property', 'redis_cached_property_as_json',
+           'redis_cached_method', 'redis_cached_method_as_json', 'RedisHash', 'JSONRedisHash',
+           'RedisList', 'JSONRedisList', 'build_object_key')
 
 
 @jinja_fragment_extension("cache")
@@ -38,7 +39,7 @@ class PartialObject(object):
 
     def _load(self):
         if not self._obj:
-            object.__setattr__(self, "_obj",self.loader())
+            object.__setattr__(self, "_obj", self.loader())
         return self._obj
 
     def __getattr__(self, name):
@@ -50,6 +51,38 @@ class PartialObject(object):
         if name in self._cached_attrs:
             del self._cached_attrs[name]
         setattr(self._load(), name, value)
+
+
+def redis_get_set(key, callback, ttl=None, coerce=None, serializer=None, redis=None):
+    if not redis:
+        redis = current_app.features.redis.connection
+    if redis.exists(key):
+        value = redis.get(key)
+        if coerce:
+            return coerce(value)
+        return value
+    _value = value = callback()
+    if serializer:
+        _value = serializer(value)
+    if ttl:
+        redis.setex(key, ttl, _value)
+    else:
+        redis.set(key, _value)
+    return value
+
+
+def redis_get_set_as_json(key, callback, **kwargs):
+    kwargs['serializer'] = json.dumps
+    kwargs['coerce'] = json.loads
+    return redis_get_set(key, callback, **kwargs)
+
+
+def redis_cached_function(key, **opts):
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            return redis_get_set(key, func, **opts)
+        return wrapper
+    return decorator
 
 
 def build_object_key(obj, name=None, key=None, at_values=None):
