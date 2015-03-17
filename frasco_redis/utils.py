@@ -211,9 +211,10 @@ class RedisCachedProperty(RedisCachedAttribute):
     def get_cached(self, obj):
         try:
             key = self.build_key(obj)
-            return self._get_cached_value(key)
-        except:
-            pass
+        except Exception as e:
+            current_app.logger.error(e)
+            return unknown_value
+        return self._get_cached_value(key)
 
     def get_fresh(self, obj):
         return self._call_func(obj)
