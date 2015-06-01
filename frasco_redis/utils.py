@@ -1,4 +1,5 @@
 from frasco import current_app, json
+from frasco.utils import unknown_value
 from frasco.templating import jinja_fragment_extension
 import re
 import inspect
@@ -108,12 +109,6 @@ def build_object_key(obj, name=None, key=None, at_values=None):
                 value = cache_id()
         attributes[attr] = value
     return key.format(**attributes)
-
-
-class UnknownValue(object):
-    pass
-
-unknown_value = UnknownValue()
 
 
 class RedisCachedAttribute(object):
@@ -258,48 +253,54 @@ class RedisCachedMethod(RedisCachedAttribute):
         return self
 
     def __call__(self, *args, **kwargs):
+        obj = kwargs.pop('__obj__', self.obj)
         value = unknown_value
         if not self.cache_disabled:
             key = None
             try:
-                key = self.build_key(args, kwargs)
+                key = self.build_key(args, kwargs, obj)
                 value = self._get_cached_value(key)
             except Exception as e:
                 current_app.logger.error(e)
                 value = unknown_value
         if value is unknown_value:
-            value = self.fresh(*args, **kwargs)
+            value = self._call_func(obj, *args, **kwargs)
             if not self.cache_disabled and not self.cache_ignore_current and key:
                 self._set_cached_value(key, value,
                     getattr(self.obj, '__redis_cache_ttl__', None))
         return value
 
     def cached(self, *args, **kwargs):
+        obj = kwargs.pop('__obj__', self.obj)
         try:
-            key = self.build_key(args, kwargs)
+            key = self.build_key(args, kwargs, obj)
         except Exception as e:
             current_app.logger.error(e)
             return unknown_value
         return self._get_cached_value(key)
 
     def fresh(self, *args, **kwargs):
-        return self._call_func(self.obj, *args, **kwargs)
+        obj = kwargs.pop('__obj__', self.obj)
+        return self._call_func(obj, *args, **kwargs)
 
     def invalidate(self, *args, **kwargs):
+        obj = kwargs.pop('__obj__', self.obj)
         try:
-            key = self.build_key(args, kwargs)
+            key = self.build_key(args, kwargs, obj)
         except Exception as e:
             current_app.logger.error(e)
             return
         self.redis.delete(key)
 
-    def build_key(self, args=None, kwargs=None):
+    def build_key(self, args=None, kwargs=None, obj=None):
+        if not obj:
+            obj = self.obj
         if not args:
             args = []
         if not kwargs:
             kwargs = {}
-        at_values = inspect.getcallargs(self.func, self.obj, *args, **kwargs)
-        return build_object_key(self.obj, self.name, self.key, at_values)
+        at_values = inspect.getcallargs(self.func, obj, *args, **kwargs)
+        return build_object_key(obj, self.name, self.key, at_values)
 
 
 def redis_cached_method(func=None, **kwargs):
