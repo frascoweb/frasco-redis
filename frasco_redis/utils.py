@@ -8,7 +8,7 @@ import inspect
 __all__ = ('CacheFragmentExtension', 'PartialObject', 'redis_get_set', 'redis_get_set_as_json',
            'redis_cached_function', 'unknown_value', 'redis_cached_property', 'redis_cached_property_as_json',
            'redis_cached_method', 'redis_cached_method_as_json', 'RedisHash', 'JSONRedisHash',
-           'RedisList', 'JSONRedisList', 'build_object_key')
+           'RedisList', 'JSONRedisList', 'RedisSet', 'JSONRedisSet', 'build_object_key')
 
 
 @jinja_fragment_extension("cache")
@@ -419,3 +419,57 @@ class JSONRedisList(RedisList):
     def __init__(self, key, **kwargs):
         kwargs['serializer'] = json
         super(JSONRedisList, self).__init__(key, **kwargs)
+
+
+class RedisSet(RedisObject):
+    def __iter__(self):
+        for value in self.redis.smembers(self.key):
+            yield self._from_redis(value)
+
+    def __contains__(self, value):
+        return self.redis.ismember(self.key, value)
+
+    def add(self, value):
+        self.redis.sadd(self.key, self._to_redis(value))
+
+    def update(self, lst):
+        pipe = self.redis.pipeline()
+        for v in lst:
+            pipe.sadd(self.key, self._to_redis(v))
+        pipe.execute()
+
+    def remove(self, value):
+        self.redis.srem(self.key, self._to_redis(value))
+
+    def pop(self):
+        return self._from_redis(self.redis.spop(self.key))
+
+    def move(self, destination, value):
+        if isinstance(destination, RedisSet):
+            destination = destination.key
+        self.redis.smove(self.key, self.destination, self._to_redis(value))
+
+    def diff(self, *other_keys):
+        return self._cmp('sdiff', other_keys)
+
+    def inter(self, *other_keys):
+        return self._cmp('sinter', other_keys)
+
+    def union(self, *other_keys):
+        return self._cmp('union', other_keys)
+
+    def _cmp(self, op, other_keys):
+        keys = []
+        for k in other_keys:
+            if isinstance(k, RedisSet):
+                keys.append(k.key)
+            else:
+                keys.append(k)
+        for value in getattr(self.redis, op)(self.key, *keys):
+            yield self._from_redis(value)
+
+
+class JSONRedisSet(RedisSet):
+    def __init__(self, key, **kwargs):
+        kwargs['serializer'] = json
+        super(JSONRedisSet, self).__init__(key, **kwargs)
