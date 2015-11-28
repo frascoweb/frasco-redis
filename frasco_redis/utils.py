@@ -86,29 +86,44 @@ def redis_cached_function(key, **opts):
     return decorator
 
 
-def build_object_key(obj, name=None, key=None, at_values=None):
-    super_key = getattr(obj, '__redis_cache_key__', None)
+def build_object_key(obj=None, name=None, key=None, at_values=None, values=None, super_key=None):
+    cls = None
+    if obj:
+        super_key = getattr(obj, '__redis_cache_key__', None)
+        if inspect.isclass(obj):
+            cls = obj
+        else:
+            cls = obj.__class__
+    elif not key:
+        raise ValueError('obj or key is needed for build_object_key()')
+
     if key and '{__super__}' in key and super_key is not None:
         key = key.replace('{__super__}', super_key)
     elif not key and super_key:
         key = super_key
     elif not key:
-        key = '%s:{__name__}' % obj.__class__.__name__
-    attributes = {}
+        key = '%s:{__name__}' % cls.__name__
+    if name is None and cls:
+        name = cls.__name__
+    if values is None:
+        values = {}
+    else:
+        values = dict(**values)
+
     for attr in re.findall(r'\{(@?[a-z0-9_]+)[^}]*\}', key, re.I):
         value = ''
-        if attr == '__name__':
-            value = name or obj.__class__.__name__
+        if attr == '__name__' and name is not None:
+            value = name
         elif attr.startswith('@') and at_values:
             value = at_values.get(attr[1:], '')
-        else:
+        elif obj:
             value = getattr(obj, attr)
         if value:
             cache_id = getattr(value, '__redis_cache_id__', None)
             if cache_id:
                 value = cache_id()
-        attributes[attr] = value
-    return key.format(**attributes)
+        values[attr] = value
+    return key.format(**values)
 
 
 class RedisCachedAttribute(object):

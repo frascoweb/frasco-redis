@@ -3,7 +3,7 @@ from setuptools import setup, find_packages
 
 setup(
     name='frasco-redis',
-    version='0.1.3',
+    version='0.1.4',
     url='http://github.com/frascoweb/frasco-redis',
     license='MIT',
     author='Maxime Bouroumeau-Fuseau',
