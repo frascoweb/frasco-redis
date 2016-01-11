@@ -193,7 +193,7 @@ class RedisCachedProperty(RedisCachedAttribute):
                     key = self.build_key(obj)
                     value = self._get_cached_value(key)
                 except Exception as e:
-                    current_app.logger.error(e)
+                    current_app.log_exception(e)
                     value = unknown_value
             if value is unknown_value:
                 value = self.get_fresh(obj)
@@ -222,7 +222,7 @@ class RedisCachedProperty(RedisCachedAttribute):
         try:
             key = self.build_key(obj)
         except Exception as e:
-            current_app.logger.error(e)
+            current_app.log_exception(e)
             return unknown_value
         return self._get_cached_value(key)
 
@@ -236,7 +236,7 @@ class RedisCachedProperty(RedisCachedAttribute):
         try:
             key = self.build_key(obj)
         except Exception as e:
-            current_app.logger.error(e)
+            current_app.log_exception(e)
             return
         self.redis.delete(key)
 
@@ -276,7 +276,7 @@ class RedisCachedMethod(RedisCachedAttribute):
                 key = self.build_key(args, kwargs, obj)
                 value = self._get_cached_value(key)
             except Exception as e:
-                current_app.logger.error(e)
+                current_app.log_exception(e)
                 value = unknown_value
         if value is unknown_value:
             value = self._call_func(obj, *args, **kwargs)
@@ -290,7 +290,7 @@ class RedisCachedMethod(RedisCachedAttribute):
         try:
             key = self.build_key(args, kwargs, obj)
         except Exception as e:
-            current_app.logger.error(e)
+            current_app.log_exception(e)
             return unknown_value
         return self._get_cached_value(key)
 
@@ -303,7 +303,7 @@ class RedisCachedMethod(RedisCachedAttribute):
         try:
             key = self.build_key(args, kwargs, obj)
         except Exception as e:
-            current_app.logger.error(e)
+            current_app.log_exception(e)
             return
         self.redis.delete(key)
 
