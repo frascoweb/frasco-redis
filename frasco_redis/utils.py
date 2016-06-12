@@ -3,12 +3,13 @@ from frasco.utils import unknown_value
 from frasco.templating import jinja_fragment_extension
 import re
 import inspect
+import functools
 
 
 __all__ = ('CacheFragmentExtension', 'PartialObject', 'redis_get_set', 'redis_get_set_as_json',
-           'redis_cached_function', 'unknown_value', 'redis_cached_property', 'redis_cached_property_as_json',
-           'redis_cached_method', 'redis_cached_method_as_json', 'RedisHash', 'JSONRedisHash',
-           'RedisList', 'JSONRedisList', 'RedisSet', 'JSONRedisSet', 'build_object_key')
+           'redis_cached_function', 'redis_cached_function_as_json', 'unknown_value', 'redis_cached_property',
+           'redis_cached_property_as_json', 'redis_cached_method', 'redis_cached_method_as_json', 'RedisHash',
+           'JSONRedisHash', 'RedisList', 'JSONRedisList', 'RedisSet', 'JSONRedisSet', 'build_object_key')
 
 
 @jinja_fragment_extension("cache")
@@ -78,14 +79,6 @@ def redis_get_set_as_json(key, callback, **kwargs):
     return redis_get_set(key, callback, **kwargs)
 
 
-def redis_cached_function(key, **opts):
-    def decorator(func):
-        def wrapper(*args, **kwargs):
-            return redis_get_set(key, func, **opts)
-        return wrapper
-    return decorator
-
-
 def build_object_key(obj=None, name=None, key=None, at_values=None, values=None, super_key=None):
     cls = None
     if obj:
@@ -111,19 +104,35 @@ def build_object_key(obj=None, name=None, key=None, at_values=None, values=None,
         values = dict(**values)
 
     for attr in re.findall(r'\{(@?[a-z0-9_]+)[^}]*\}', key, re.I):
-        value = ''
+        value = unknown_value
         if attr == '__name__' and name is not None:
             value = name
         elif attr.startswith('@') and at_values:
             value = at_values.get(attr[1:], '')
         elif obj:
             value = getattr(obj, attr)
-        if value:
+        if value is not unknown_value:
             cache_id = getattr(value, '__redis_cache_id__', None)
             if cache_id:
                 value = cache_id()
-        values[attr] = value
+            values[attr] = value
     return key.format(**values)
+
+
+def redis_cached_function(key, **opts):
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            k = build_object_key(None, func.__name__, key, values=inspect.getcallargs(func, *args, **kwargs))
+            return redis_get_set(k, lambda: func(*args, **kwargs), **opts)
+        return wrapper
+    return decorator
+
+
+def redis_cached_function_as_json(key, **opts):
+    opts['serializer'] = json.dumps
+    opts['coerce'] = json.loads
+    return redis_cached_function(key, **opts)
 
 
 class RedisCachedAttribute(object):
